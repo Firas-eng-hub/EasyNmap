@@ -26,6 +26,7 @@ def show_banner():
     console.print(Panel(
         "[bold cyan]EASYNMAP  v1.0[/bold cyan]\n"
         "[dim]Beginner-friendly nmap wrapper[/dim]\n"
+        "[dim]Made by [/dim][bold magenta]OSCUROO[/bold magenta]\n\n"
         "Type [bold cyan]/[/bold cyan] to see commands  •  "
         "[bold cyan]/help[/bold cyan] for details  •  "
         "[bold cyan]/exit[/bold cyan] to quit",
