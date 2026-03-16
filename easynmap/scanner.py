@@ -63,6 +63,21 @@ class ScanResult:
 # Internal runner
 # ---------------------------------------------------------------------------
 
+_ROOT_HINTS = (
+    "requires root",
+    "requires privileged",
+    "you requested a scan type which requires root",
+    "tcp connect",
+    "operation not permitted",
+    "raw sockets",
+)
+
+
+def needs_root(error: str) -> bool:
+    low = error.lower()
+    return any(h in low for h in _ROOT_HINTS)
+
+
 def _run(cmd: list[str], scan_type: str, target: str) -> ScanResult:
     try:
         proc = subprocess.run(
@@ -85,13 +100,23 @@ def _run(cmd: list[str], scan_type: str, target: str) -> ScanResult:
         return ScanResult(
             scan_type=scan_type, target=target, command=cmd,
             raw_output="", return_code=-1,
-            error="nmap is not installed. Install it with: sudo apt install nmap",
+            error=(
+                "nmap is not installed.\n"
+                "  Install it with:  sudo apt install nmap\n"
+                "  Then re-run easynmap."
+            ),
         )
     except subprocess.TimeoutExpired:
         return ScanResult(
             scan_type=scan_type, target=target, command=cmd,
             raw_output="", return_code=-1,
             error="Scan timed out after 5 minutes.",
+        )
+    except KeyboardInterrupt:
+        return ScanResult(
+            scan_type=scan_type, target=target, command=cmd,
+            raw_output="", return_code=-1,
+            error="Scan interrupted by user (Ctrl+C).",
         )
 
 

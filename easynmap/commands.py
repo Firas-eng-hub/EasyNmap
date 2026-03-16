@@ -37,27 +37,49 @@ SCAN_SUBCOMMANDS = {
 # ---------------------------------------------------------------------------
 
 def _ask_target(prompt_text: str = "  Target IP / hostname / CIDR: ") -> str | None:
-    """Prompt for a target; return None if user cancels."""
-    try:
-        return pt_prompt(prompt_text).strip()
-    except (KeyboardInterrupt, EOFError):
-        console.print("\n[dim]  Cancelled.[/dim]")
-        return None
+    """
+    Prompt for a target with re-ask on invalid input.
+    Returns a validated target string, or None if the user cancels.
+    """
+    while True:
+        try:
+            raw = pt_prompt(prompt_text).strip()
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[dim]  Cancelled.[/dim]")
+            return None
+
+        if not raw:
+            console.print("[yellow]  Target cannot be empty. Try again, or press Ctrl+C to cancel.[/yellow]")
+            continue
+
+        ok, reason = scanner.validate_target(raw)
+        if ok:
+            return raw
+        console.print(f"[red]  Invalid target:[/red] {reason}  — try again, or Ctrl+C to cancel.")
 
 
 def _validate_and_run(scan_fn, target: str, state: dict, auto_save: bool = False):
+    # target is already validated by _ask_target, but double-check for programmatic calls
     ok, reason = scanner.validate_target(target)
     if not ok:
         console.print(f"[red]  Invalid target:[/red] {reason}")
         return
 
-    with console.status("[cyan]  Scanning…[/cyan]", spinner="dots"):
-        result = scan_fn(target)
-
-    if result.error:
-        _handle_error(result)
+    try:
+        with console.status("[cyan]  Scanning…[/cyan]", spinner="dots"):
+            result = scan_fn(target)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]  Scan interrupted.[/yellow]")
         return
 
+    if result.error:
+        _handle_error(result, scan_fn, target, state, auto_save)
+        return
+
+    _display_and_save(result, state, auto_save)
+
+
+def _display_and_save(result, state: dict, auto_save: bool):
     state["last_result"] = result
 
     if result.scan_type == "sweep":
@@ -72,14 +94,53 @@ def _validate_and_run(scan_fn, target: str, state: dict, auto_save: bool = False
         console.print(f"  [green]Output saved:[/green] {path}")
 
 
-def _handle_error(result):
+def _handle_error(result, scan_fn=None, target: str = "", state: dict = None, auto_save: bool = False):
+    if "Ctrl+C" in result.error or "interrupted" in result.error.lower():
+        console.print("[yellow]  Scan was interrupted.[/yellow]")
+        return
+
+    if "not installed" in result.error:
+        console.print(f"[red]  Error:[/red] {result.error}")
+        return
+
+    if scanner.needs_root(result.error):
+        console.print(
+            "[yellow]  This scan type requires root privileges.[/yellow]\n"
+            "  Re-running with [bold]sudo[/bold]…"
+        )
+        _retry_with_sudo(result.command, result.scan_type, target, state, auto_save)
+        return
+
     console.print(f"[red]  Scan failed:[/red] {result.error}")
-    if result.return_code == 1 and (
-        "requires root" in result.error.lower()
-        or "tcp connect" in result.error.lower()
-        or "you requested a scan type" in result.error.lower()
-    ):
-        console.print("[yellow]  Tip: OS detection (-O) requires root. Try running easynmap with sudo.[/yellow]")
+
+
+def _retry_with_sudo(cmd: list[str], scan_type: str, target: str, state: dict, auto_save: bool):
+    sudo_cmd = ["sudo"] + cmd
+    try:
+        with console.status("[cyan]  Scanning (sudo)…[/cyan]", spinner="dots"):
+            import subprocess as _sp
+            proc = _sp.run(sudo_cmd, capture_output=True, text=True, timeout=300)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]  Scan interrupted.[/yellow]")
+        return
+    except FileNotFoundError:
+        console.print("[red]  sudo not found.[/red]")
+        return
+
+    from easynmap.scanner import ScanResult
+    result = ScanResult(
+        scan_type=scan_type,
+        target=target,
+        command=sudo_cmd,
+        raw_output=proc.stdout + proc.stderr,
+        return_code=proc.returncode,
+    )
+    if proc.returncode != 0:
+        result.error = proc.stderr.strip() or "sudo nmap exited with a non-zero status."
+        console.print(f"[red]  Scan failed even with sudo:[/red] {result.error}")
+        return
+
+    _display_and_save(result, state or {}, auto_save)
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +218,15 @@ def handle_vuln(args: list[str], state: dict):
 # /ask
 # ---------------------------------------------------------------------------
 
+def _print_ai_error(err: str):
+    console.print(f"[red]  AI error:[/red] {err}")
+    if "internet" in err.lower() or "connect" in err.lower() or "network" in err.lower():
+        console.print(
+            "[dim]  Tip: AI features require internet. "
+            "Scan commands still work offline.[/dim]"
+        )
+
+
 def handle_ask(args: list[str], _state):
     question = " ".join(args).strip()
     if not question:
@@ -172,7 +242,7 @@ def handle_ask(args: list[str], _state):
         text, err = ai.ask_question(question)
 
     if err:
-        console.print(f"[red]  AI error:[/red] {err}")
+        _print_ai_error(err)
         return
 
     console.print()
@@ -194,7 +264,7 @@ def handle_explain(_args, state: dict):
         text, err = ai.explain_scan(result.raw_output)
 
     if err:
-        console.print(f"[red]  AI error:[/red] {err}")
+        _print_ai_error(err)
         return
 
     console.print()
@@ -221,7 +291,7 @@ def handle_ai(args: list[str], state: dict):
         cmd_str, err = ai.natural_language_to_nmap(description)
 
     if err:
-        console.print(f"[red]  AI error:[/red] {err}")
+        _print_ai_error(err)
         return
 
     console.print()
@@ -256,8 +326,12 @@ def handle_ai(args: list[str], state: dict):
         return
 
     import subprocess
-    with console.status("[cyan]  Scanning…[/cyan]", spinner="dots"):
-        proc = subprocess.run(parts, capture_output=True, text=True, timeout=300)
+    try:
+        with console.status("[cyan]  Scanning…[/cyan]", spinner="dots"):
+            proc = subprocess.run(parts, capture_output=True, text=True, timeout=300)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]  Scan interrupted.[/yellow]")
+        return
 
     from easynmap.scanner import ScanResult
     result = ScanResult(
@@ -267,6 +341,11 @@ def handle_ai(args: list[str], state: dict):
         raw_output=proc.stdout + proc.stderr,
         return_code=proc.returncode,
     )
+    if proc.returncode != 0:
+        result.error = proc.stderr.strip() or "nmap exited with a non-zero status."
+        console.print(f"[red]  Scan failed:[/red] {result.error}")
+        return
+
     state["last_result"] = result
     print_raw(result)
 
@@ -285,7 +364,7 @@ def handle_report(_args, state: dict):
         text, err = ai.generate_report(result.raw_output)
 
     if err:
-        console.print(f"[red]  AI error:[/red] {err}")
+        _print_ai_error(err)
         return
 
     console.print()
