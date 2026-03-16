@@ -1,7 +1,8 @@
 from prompt_toolkit import prompt as pt_prompt
 from rich.console import Console
+from rich.markdown import Markdown
 
-from easynmap import scanner
+from easynmap import scanner, ai
 from easynmap.display import print_ports_table, print_sweep_table, print_raw
 
 console = Console()
@@ -142,31 +143,182 @@ def handle_vuln(_args, state: dict):
 
 
 # ---------------------------------------------------------------------------
-# Phase 4 stubs
+# /ask
 # ---------------------------------------------------------------------------
 
-def handle_ask(_args, _state):
-    console.print("[yellow]  /ask — coming in Phase 4[/yellow]")
+def handle_ask(args: list[str], _state):
+    question = " ".join(args).strip()
+    if not question:
+        try:
+            question = pt_prompt("  Your question: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[dim]  Cancelled.[/dim]")
+            return
+    if not question:
+        return
 
+    with console.status("[cyan]  Asking AI…[/cyan]", spinner="dots"):
+        text, err = ai.ask_question(question)
 
-def handle_explain(_args, _state):
-    console.print("[yellow]  /explain — coming in Phase 4[/yellow]")
+    if err:
+        console.print(f"[red]  AI error:[/red] {err}")
+        return
 
-
-def handle_ai(_args, _state):
-    console.print("[yellow]  /ai — coming in Phase 4[/yellow]")
-
-
-def handle_report(_args, _state):
-    console.print("[yellow]  /report — coming in Phase 4[/yellow]")
+    console.print()
+    console.print(Markdown(text))
+    console.print()
 
 
 # ---------------------------------------------------------------------------
-# Phase 5 stub
+# /explain
 # ---------------------------------------------------------------------------
 
-def handle_save(_args, _state):
-    console.print("[yellow]  /save — coming in Phase 5[/yellow]")
+def handle_explain(_args, state: dict):
+    result = state.get("last_result")
+    if result is None:
+        console.print("[yellow]  No scan result to explain yet. Run a scan first.[/yellow]")
+        return
+
+    with console.status("[cyan]  Asking AI to explain scan…[/cyan]", spinner="dots"):
+        text, err = ai.explain_scan(result.raw_output)
+
+    if err:
+        console.print(f"[red]  AI error:[/red] {err}")
+        return
+
+    console.print()
+    console.print(Markdown(text))
+    console.print()
+
+
+# ---------------------------------------------------------------------------
+# /ai  (natural language → nmap)
+# ---------------------------------------------------------------------------
+
+def handle_ai(args: list[str], state: dict):
+    description = " ".join(args).strip()
+    if not description:
+        try:
+            description = pt_prompt("  Describe the scan you want: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[dim]  Cancelled.[/dim]")
+            return
+    if not description:
+        return
+
+    with console.status("[cyan]  Generating nmap command…[/cyan]", spinner="dots"):
+        cmd_str, err = ai.natural_language_to_nmap(description)
+
+    if err:
+        console.print(f"[red]  AI error:[/red] {err}")
+        return
+
+    console.print()
+    console.print(f"  [bold cyan]Generated command:[/bold cyan] [bold]{cmd_str}[/bold]")
+    console.print()
+
+    # Validate it starts with nmap
+    if not cmd_str.lower().startswith("nmap"):
+        console.print("[yellow]  AI returned an unexpected response. Not running it.[/yellow]")
+        return
+
+    try:
+        confirm = pt_prompt("  Run this command? [y/N]: ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        console.print("\n[dim]  Cancelled.[/dim]")
+        return
+
+    if confirm != "y":
+        console.print("[dim]  Cancelled.[/dim]")
+        return
+
+    # Parse args from the AI-generated command and extract target (last token)
+    parts = cmd_str.split()
+    if len(parts) < 2:
+        console.print("[red]  Command too short to run safely.[/red]")
+        return
+
+    target = parts[-1]
+    ok, reason = scanner.validate_target(target)
+    if not ok:
+        console.print(f"[red]  Generated target '{target}' failed validation:[/red] {reason}")
+        return
+
+    import subprocess
+    with console.status("[cyan]  Scanning…[/cyan]", spinner="dots"):
+        proc = subprocess.run(parts, capture_output=True, text=True, timeout=300)
+
+    from easynmap.scanner import ScanResult
+    result = ScanResult(
+        scan_type="ai",
+        target=target,
+        command=parts,
+        raw_output=proc.stdout + proc.stderr,
+        return_code=proc.returncode,
+    )
+    state["last_result"] = result
+    print_raw(result)
+
+
+# ---------------------------------------------------------------------------
+# /report
+# ---------------------------------------------------------------------------
+
+def handle_report(_args, state: dict):
+    result = state.get("last_result")
+    if result is None:
+        console.print("[yellow]  No scan result available. Run a scan first.[/yellow]")
+        return
+
+    with console.status("[cyan]  Generating security report…[/cyan]", spinner="dots"):
+        text, err = ai.generate_report(result.raw_output)
+
+    if err:
+        console.print(f"[red]  AI error:[/red] {err}")
+        return
+
+    console.print()
+    console.print(Markdown(text))
+    console.print()
+
+    # Offer to save
+    try:
+        save = pt_prompt("  Save report to file? [y/N]: ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        return
+
+    if save == "y":
+        _save_report(text)
+
+
+# ---------------------------------------------------------------------------
+# /save  (Phase 5 — basic version usable now)
+# ---------------------------------------------------------------------------
+
+def _save_report(text: str) -> None:
+    from datetime import datetime
+    from pathlib import Path
+    out_dir = Path.home() / "easynmap-results"
+    out_dir.mkdir(exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = out_dir / f"report_{ts}.md"
+    path.write_text(text)
+    console.print(f"  [green]Saved:[/green] {path}")
+
+
+def handle_save(_args, state: dict):
+    result = state.get("last_result")
+    if result is None:
+        console.print("[yellow]  No scan result to save. Run a scan first.[/yellow]")
+        return
+    from datetime import datetime
+    from pathlib import Path
+    out_dir = Path.home() / "easynmap-results"
+    out_dir.mkdir(exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = out_dir / f"scan_{result.scan_type}_{ts}.txt"
+    path.write_text(result.raw_output)
+    console.print(f"  [green]Saved:[/green] {path}")
 
 
 # ---------------------------------------------------------------------------
