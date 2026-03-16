@@ -62,7 +62,7 @@ pip install -r requirements.txt
 
 ## API Key Setup
 
-easynmap uses **Gemini Flash** via [OpenRouter](https://openrouter.ai) for AI features.
+easynmap uses **GLM 4.5** via [OpenRouter](https://openrouter.ai) for AI features.
 
 1. Go to [https://openrouter.ai](https://openrouter.ai) and create a free account
 2. Generate an API key from your dashboard
