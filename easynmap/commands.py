@@ -4,6 +4,7 @@ from rich.markdown import Markdown
 
 from easynmap import scanner, ai
 from easynmap.display import print_ports_table, print_sweep_table, print_raw
+from easynmap import output as outfile
 
 console = Console()
 
@@ -15,7 +16,8 @@ COMMANDS = {
     "/explain": "Explain the last scan result",
     "/ai":      "Translate plain English into an nmap command",
     "/report":  "Generate an AI security report",
-    "/save":    "Save last scan output to a file",
+    "/save":    "Save last scan output  (--txt | --md)",
+    "/files":   "List all saved output files",
     "/history": "Show commands used this session",
     "/clear":   "Clear the screen",
     "/help":    "Show all commands",
@@ -43,7 +45,7 @@ def _ask_target(prompt_text: str = "  Target IP / hostname / CIDR: ") -> str | N
         return None
 
 
-def _validate_and_run(scan_fn, target: str, state: dict):
+def _validate_and_run(scan_fn, target: str, state: dict, auto_save: bool = False):
     ok, reason = scanner.validate_target(target)
     if not ok:
         console.print(f"[red]  Invalid target:[/red] {reason}")
@@ -65,6 +67,10 @@ def _validate_and_run(scan_fn, target: str, state: dict):
     else:
         print_ports_table(result)
 
+    if auto_save:
+        path = outfile.save_scan(result, fmt="txt")
+        console.print(f"  [green]Output saved:[/green] {path}")
+
 
 def _handle_error(result):
     console.print(f"[red]  Scan failed:[/red] {result.error}")
@@ -81,6 +87,8 @@ def _handle_error(result):
 # ---------------------------------------------------------------------------
 
 def handle_scan(args: list[str], state: dict):
+    auto_save = "--output" in args
+    args = [a for a in args if a != "--output"]
     sub = args[0].lower() if args else ""
 
     if sub not in SCAN_SUBCOMMANDS:
@@ -88,6 +96,7 @@ def handle_scan(args: list[str], state: dict):
         console.print("  [bold cyan]/scan[/bold cyan] subcommands:")
         for name, desc in SCAN_SUBCOMMANDS.items():
             console.print(f"    [cyan]{name:<10}[/cyan] {desc}")
+        console.print(f"  [dim]Append --output to save result automatically, e.g. /scan quick --output[/dim]")
         console.print()
         try:
             sub = pt_prompt("  Choose scan type: ").strip().lower()
@@ -108,25 +117,27 @@ def handle_scan(args: list[str], state: dict):
         "service": scanner.scan_service,
         "os":      scanner.scan_os,
     }
-    _validate_and_run(scan_fns[sub], target, state)
+    _validate_and_run(scan_fns[sub], target, state, auto_save=auto_save)
 
 
 # ---------------------------------------------------------------------------
 # /sweep
 # ---------------------------------------------------------------------------
 
-def handle_sweep(_args, state: dict):
+def handle_sweep(args: list[str], state: dict):
+    auto_save = "--output" in args
     target = _ask_target("  Network (e.g. 192.168.1.0/24): ")
     if target is None:
         return
-    _validate_and_run(scanner.scan_sweep, target, state)
+    _validate_and_run(scanner.scan_sweep, target, state, auto_save=auto_save)
 
 
 # ---------------------------------------------------------------------------
 # /vuln
 # ---------------------------------------------------------------------------
 
-def handle_vuln(_args, state: dict):
+def handle_vuln(args: list[str], state: dict):
+    auto_save = "--output" in args
     target = _ask_target()
     if target is None:
         return
@@ -139,7 +150,7 @@ def handle_vuln(_args, state: dict):
     if confirm != "y":
         console.print("[dim]  Cancelled.[/dim]")
         return
-    _validate_and_run(scanner.scan_vuln, target, state)
+    _validate_and_run(scanner.scan_vuln, target, state, auto_save=auto_save)
 
 
 # ---------------------------------------------------------------------------
@@ -288,37 +299,47 @@ def handle_report(_args, state: dict):
         return
 
     if save == "y":
-        _save_report(text)
+        path = outfile.save_report(text)
+        console.print(f"  [green]Saved:[/green] {path}")
 
 
 # ---------------------------------------------------------------------------
-# /save  (Phase 5 — basic version usable now)
+# /save
 # ---------------------------------------------------------------------------
 
-def _save_report(text: str) -> None:
-    from datetime import datetime
-    from pathlib import Path
-    out_dir = Path.home() / "easynmap-results"
-    out_dir.mkdir(exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = out_dir / f"report_{ts}.md"
-    path.write_text(text)
-    console.print(f"  [green]Saved:[/green] {path}")
-
-
-def handle_save(_args, state: dict):
+def handle_save(args: list[str], state: dict):
     result = state.get("last_result")
     if result is None:
         console.print("[yellow]  No scan result to save. Run a scan first.[/yellow]")
         return
-    from datetime import datetime
-    from pathlib import Path
-    out_dir = Path.home() / "easynmap-results"
-    out_dir.mkdir(exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = out_dir / f"scan_{result.scan_type}_{ts}.txt"
-    path.write_text(result.raw_output)
+
+    # Determine format
+    fmt = "txt"
+    if "--md" in args or "--markdown" in args:
+        fmt = "md"
+    elif "--txt" in args:
+        fmt = "txt"
+    else:
+        # Interactive choice
+        console.print("  Format: [cyan]txt[/cyan] (raw output) or [cyan]md[/cyan] (markdown with table)")
+        try:
+            choice = pt_prompt("  Save as [txt/md] (default txt): ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[dim]  Cancelled.[/dim]")
+            return
+        if choice in ("md", "markdown"):
+            fmt = "md"
+
+    path = outfile.save_scan(result, fmt=fmt)
     console.print(f"  [green]Saved:[/green] {path}")
+
+
+# ---------------------------------------------------------------------------
+# /files  — list saved output
+# ---------------------------------------------------------------------------
+
+def handle_files(_args, _state):
+    outfile.list_saved_files()
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +379,7 @@ HANDLERS = {
     "/ai":      handle_ai,
     "/report":  handle_report,
     "/save":    handle_save,
+    "/files":   handle_files,
     "/history": handle_history,
     "/clear":   handle_clear,
     "/help":    handle_help,
