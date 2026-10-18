@@ -2,6 +2,16 @@
 
 > Beginner-friendly interactive nmap TUI with AI-powered explanations — built for Kali Linux.
 
+## Live web playground
+
+**[Try EasyNmap online →](https://easynmap-showcase-f8ebc9.vercel.app)**
+
+Explore the project in your browser with an interactive terminal demo, upload or paste Nmap scan output for server-side analysis, browse hosts and ports, and download a Markdown report. The responsive interface works on desktop and mobile.
+
+Demo scans use clearly labeled sample data. Uploaded results receive rule-based service guidance; the web app does not run network scans or require an AI key.
+
+The Next.js application lives in [`web/`](web/). See the [web README](web/README.md) for local development and Vercel deployment instructions.
+
 ```
 ╭──────────────────────────────────────────────────────────────────╮
 │  EASYNMAP  v1.0                                                  │
